@@ -1,0 +1,45 @@
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment variables / secrets
+.env
+.env.*
+!.env.example
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/
+
+# Logs
+logs/
+*.log
+
+# Pipeline artifacts
+data/
+
+# Model and cache artifacts
+**/models/
+.cache/
+
+# Jupyter
+.ipynb_checkpoints/

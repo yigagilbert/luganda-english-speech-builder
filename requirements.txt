@@ -1,0 +1,43 @@
+# ── Core ML / Audio ──────────────────────────────────────────────────────────
+torch>=2.1.0
+torchaudio>=2.1.0
+transformers>=4.40.0
+datasets>=2.19.0
+huggingface_hub>=0.23.0
+accelerate>=0.30.0
+soundfile>=0.12.1
+librosa>=0.10.1
+
+# ── ASR / VAD ────────────────────────────────────────────────────────────────
+silero-vad>=4.0.0
+
+# ── TTS (fallback) ───────────────────────────────────────────────────────────
+TTS>=0.22.0                   # coqui TTS (optional, heavy dependency)
+
+# ── Translation ──────────────────────────────────────────────────────────────
+sentencepiece>=0.2.0           # required by NLLB tokeniser
+
+# ── Data / Utils ─────────────────────────────────────────────────────────────
+numpy>=1.26.0
+pandas>=2.2.0
+pyarrow>=15.0.0
+tqdm>=4.66.0
+pyyaml>=6.0.1
+python-dotenv>=1.0.1
+click>=8.1.7
+
+# ── Evaluation ───────────────────────────────────────────────────────────────
+sacrebleu>=2.4.0
+jiwer>=3.0.3                   # WER for ASR quality checks
+
+# ── Logging / CLI ────────────────────────────────────────────────────────────
+rich>=13.7.0
+loguru>=0.7.2
+
+# ── Visualisation ────────────────────────────────────────────────────────────
+matplotlib>=3.8.0
+seaborn>=0.13.0
+
+# ── Testing ──────────────────────────────────────────────────────────────────
+pytest>=8.0.0
+pytest-cov>=5.0.0

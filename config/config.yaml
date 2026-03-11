@@ -1,0 +1,143 @@
+# ============================================================
+#  Luganda–English Speech Dataset Pipeline — Master Config
+# ============================================================
+
+# ── Data paths ───────────────────────────────────────────────
+paths:
+  data_root: "data"
+  raw:         "data/raw"
+  preprocessed: "data/preprocessed"
+  filtered:    "data/filtered"
+  translated:  "data/translated"
+  synthesized: "data/synthesized"
+  final:       "data/final"
+  reports:     "data/reports"
+  checkpoints: "data/checkpoints"
+
+# ── Source datasets (HuggingFace Hub) ────────────────────────
+sources:
+  - repo_id: "Sunbird/salt"
+    config:   "multispeaker-lug"
+    splits:   ["train", "dev", "test"]
+    audio_col: "audio"
+    text_col:  "text"
+    enabled:   true
+
+  - repo_id: "Sunbird/salt"
+    config:   "studio-lug"
+    splits:   ["train", "dev", "test"]
+    audio_col: "audio"
+    text_col:  "text"
+    enabled:   true
+
+  # - repo_id: "mozilla-foundation/common_voice_17_0"
+  #   config:   "lg"
+  #   splits:   ["train", "validation"]
+  #   audio_col: "audio"
+  #   text_col:  "sentence"
+  #   enabled:   true
+
+  - repo_id: "google/WaxalNLP"
+    config:   "lug_asr"
+    splits:   ["train", "validation", "test"]
+    audio_col: "audio"
+    text_col:  "transcription"
+    enabled:   true
+
+  - repo_id: "google/WaxalNLP"
+    config:   "lug_tts"
+    splits:   ["train", "validation", "test"]
+    audio_col: "audio"
+    text_col:  "transcription"
+    enabled:   true
+
+  # - repo_id: "cmu-wilderness/lug"
+  #   config:   null
+  #   splits:   ["train"]
+  #   audio_col: "audio"
+  #   text_col:  "text"
+  #   enabled:   false   # Research-only licence — disable before publishing
+
+# ── Audio preprocessing ──────────────────────────────────────
+audio:
+  sample_rate:      16000      # Hz — target sample rate for all audio
+  channels:         1          # Mono
+  bit_depth:        16         # PCM 16-bit
+  min_duration_s:   0.02        # Clips shorter than this are rejected
+  max_duration_s:   90.0       # Clips longer than this are rejected
+  review_duration_s: 20.0      # Clips > this are flagged for manual review
+  peak_norm_dbfs:   -1.0       # Peak normalisation target (dBFS)
+  vad_threshold:    0.5        # Silero VAD speech probability threshold
+  vad_min_silence_ms: 200      # Minimum silence length for trimming (ms)
+
+# ── Quality filtering ────────────────────────────────────────
+filter:
+  min_snr_db:         15.0     # Minimum signal-to-noise ratio
+  max_cps:            25.0     # Max characters per second (anti-misalign)
+  min_cps:            3.0      # Min characters per second
+  min_transcript_len: 2        # Minimum characters in transcript
+  max_transcript_len: 500      # Maximum characters in transcript
+  deduplicate_text:   true     # Remove exact-duplicate text_lug entries
+  lang_check:         true     # Filter records with > 30% non-Luganda chars
+
+# ── Machine Translation ──────────────────────────────────────
+translation:
+  backend:    "nllb_custom"    # Options: "nllb" | "nllb_custom" | "sunbird_api"
+  model:      "jq/nllb-1.3B-many-to-many-pronouncorrection-charaug"
+  tokenizer_model: "facebook/nllb-200-distilled-1.3B"
+  src_lang:   "lug"
+  tgt_lang:   "eng"
+  batch_size: 16
+  chunk_size: 20
+  max_length: 100
+  dtype:      "float32"        # bfloat16 | float16 | float32
+  device:     "auto"           # auto | cuda | cpu
+  num_beams:  5
+  language_token_ids:
+    eng: 256047
+    ach: 256111
+    lgg: 256008
+    lug: 256110
+    nyn: 256002
+    teo: 256006
+
+# ── Text-to-Speech ───────────────────────────────────────────
+tts:
+  backend:    "spark_tts"      # Options: "spark_tts" | "speecht5" | "sunbird_api" | "coqui"
+  model:      "jq/spark-tts-salt"
+  spark_codec_model: "unsloth/Spark-TTS-0.5B"
+  spark_cache_dir: "data/models/spark_tts"
+  spark_voice_prefix: "248"    # 248 = Luganda female voice in SALT studio set
+  spark_temperature: 0.8
+  spark_top_k: 50
+  spark_top_p: 1.0
+  spark_max_new_audio_tokens: 2048
+  spark_max_seq_length: 2048
+  # SpeechT5 fallback settings (used only when backend=speecht5)
+  speecht5_model: "microsoft/speecht5_tts"
+  vocoder:    "microsoft/speecht5_hifigan"
+  speaker_embeddings: "Matthijs/cmu-arctic-xvectors"
+  speaker_id: 7306
+  output_sample_rate: 22050
+  batch_size: 16
+  device:     "auto"
+
+# ── Dataset assembly & Hub push ──────────────────────────────
+hub:
+  repo_id:         "yigagilbert/luganda-english-speech-"
+  repo_type:       "dataset"
+  private:         true
+  max_shard_size:  "2GB"
+  push_to_hub:     false       # Set true when ready to publish
+
+# ── QA / Reporting ───────────────────────────────────────────
+qa:
+  spot_check_n:    200         # Number of samples for human MT eval export
+  plot_format:     "png"
+  bleu_reference:  null        # Path to reference translations file (optional)
+
+# ── Logging ─────────────────────────────────────────────────
+logging:
+  level:       "INFO"          # DEBUG | INFO | WARNING | ERROR
+  log_dir:     "logs"
+  log_file:    "pipeline.log"
