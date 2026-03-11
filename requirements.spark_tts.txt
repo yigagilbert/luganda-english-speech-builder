@@ -1,0 +1,7 @@
+# Spark-TTS inference dependencies (optional)
+-r requirements.txt
+unsloth
+omegaconf
+einx
+einops
+git+https://github.com/SparkAudio/Spark-TTS.git

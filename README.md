@@ -67,6 +67,8 @@ luganda_pipeline/
 │
 ├── scripts/
 │   ├── run_pipeline.sh        # Full run (bash entry point)
+│   ├── run_gpu_fast.sh        # GPU-optimized main pipeline launcher
+│   ├── run_cv24_gpu_fast.sh   # GPU-optimized CV24 bilingual launcher
 │   └── run_stage.sh           # Run a single named stage
 │
 └── tests/
@@ -89,6 +91,12 @@ source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
+For Spark-TTS backend:
+
+```bash
+pip install -r requirements.spark_tts.txt
+```
+
 ### 2. Configure
 
 ```bash
@@ -109,6 +117,20 @@ Or with the shell helper:
 
 ```bash
 bash scripts/run_pipeline.sh
+```
+
+For rented GPU instances (optimized env vars + cache settings):
+
+```bash
+bash scripts/run_gpu_fast.sh
+# or a single stage:
+STAGE=translation bash scripts/run_gpu_fast.sh
+STAGE=tts bash scripts/run_gpu_fast.sh
+
+# CV24 Luganda -> bilingual dataset fast path:
+bash scripts/run_cv24_gpu_fast.sh
+# default tuned preset:
+# config/config.gpu_fast.yaml
 ```
 
 ### 4. Run a single stage
@@ -173,6 +195,15 @@ Re-running any command will automatically resume from the last completed stage.
 | `tts.model` | `microsoft/speecht5_tts` | TTS model |
 | `tts.batch_size` | `16` | TTS batch size |
 | `hub.repo_id` | `your-org/luganda-english-speech` | HF Hub target |
+
+### GPU Throughput Tips
+
+- Keep `backend: nllb_custom` and `backend: spark_tts` in `config/config.yaml` for your fine-tuned models.
+- Start with `translation.batch_size=32` / `translation.generation_batch_size=32`, then increase until GPU memory is nearly full.
+- Keep Hugging Face caches on local NVMe (`HF_HOME`, `HF_DATASETS_CACHE`, `TRANSFORMERS_CACHE`) for faster downloads/loading.
+- Run stages separately for better recovery and tuning:
+  - `STAGE=translation bash scripts/run_gpu_fast.sh`
+  - `STAGE=tts bash scripts/run_gpu_fast.sh`
 
 ---
 

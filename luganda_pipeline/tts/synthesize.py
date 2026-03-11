@@ -162,6 +162,15 @@ class SparkTTSSynthesizer:
         self.audio_tokenizer = BiCodecTokenizer(str(codec_path), str(self.device))
         self._native_sr = int(self.audio_tokenizer.config.get("sample_rate", 24_000))
 
+        if self.device.type == "cuda" and tts_cfg.get("allow_tf32", True):
+            torch.backends.cuda.matmul.allow_tf32 = True
+
+        if self.device.type == "cuda" and tts_cfg.get("spark_compile", False):
+            try:
+                self.model = torch.compile(self.model)
+            except Exception as exc:
+                log.warning(f"Spark torch.compile disabled due to runtime error: {exc}")
+
     @staticmethod
     def _resolve_model_ref(model_ref: str, local_dir: Path) -> Path:
         model_path = Path(model_ref).expanduser()
@@ -235,7 +244,7 @@ class SparkTTSSynthesizer:
         prompt = self._build_prompt(text)
         model_inputs = self.tokenizer([prompt], return_tensors="pt").to(self.device)
 
-        with torch.no_grad():
+        with torch.inference_mode():
             generated_ids = self.model.generate(
                 **model_inputs,
                 max_new_tokens=self._max_new_audio_tokens,

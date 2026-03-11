@@ -148,7 +148,11 @@ class CustomNLLBTranslator:
         tokenizer_id = t_cfg.get("tokenizer_model", model_id)
         self._chunk_size = int(t_cfg.get("chunk_size", 20))
         self._max_length = int(t_cfg.get("max_length", 100))
+        self._max_input_length = int(t_cfg.get("max_input_length", 256))
         self._num_beams = int(t_cfg.get("num_beams", 5))
+        self._generation_batch_size = int(
+            t_cfg.get("generation_batch_size", t_cfg.get("batch_size", 16))
+        )
         dtype_str = t_cfg.get("dtype", "float32")
 
         torch_dtype = {
@@ -189,32 +193,64 @@ class CustomNLLBTranslator:
         self.model.to(self.device)
         self.model.eval()
 
-    def _translate_segment(self, text: str) -> str:
-        text = text.strip()
-        if not text:
-            return ""
+        # GPU throughput knobs (safe defaults on Ampere/Hopper+).
+        if self.device.type == "cuda" and t_cfg.get("allow_tf32", True):
+            torch.backends.cuda.matmul.allow_tf32 = True
 
-        inputs = self.tokenizer(text, return_tensors="pt", truncation=True).to(self.device)
-        inputs["input_ids"][0][0] = self._src_lang_token_id
-        with torch.no_grad():
-            translated_tokens = self.model.generate(
-                **inputs,
-                forced_bos_token_id=self._tgt_lang_token_id,
-                max_length=self._max_length,
-                num_beams=self._num_beams,
-            )
+        if self.device.type == "cuda" and t_cfg.get("compile", False):
+            try:
+                self.model = torch.compile(self.model)
+            except Exception as exc:
+                log.warning(f"torch.compile disabled due to runtime error: {exc}")
 
-        return self.tokenizer.batch_decode(translated_tokens, skip_special_tokens=True)[0].strip()
-
-    def _translate_text(self, text: str) -> str:
-        segments = _segment_text(text, chunk_size=self._chunk_size)
+    def _translate_segments_batched(self, segments: list[str]) -> list[str]:
         if not segments:
-            return ""
-        translated = [self._translate_segment(segment) for segment in segments]
-        return " ".join(part for part in translated if part).strip()
+            return []
+
+        translations: list[str] = []
+        for start in range(0, len(segments), self._generation_batch_size):
+            seg_batch = [s.strip() for s in segments[start : start + self._generation_batch_size]]
+            inputs = self.tokenizer(
+                seg_batch,
+                return_tensors="pt",
+                truncation=True,
+                padding=True,
+                max_length=self._max_input_length,
+            ).to(self.device)
+
+            # Match reference behavior: explicit source language token in first position.
+            inputs["input_ids"][:, 0] = self._src_lang_token_id
+            with torch.inference_mode():
+                translated_tokens = self.model.generate(
+                    **inputs,
+                    forced_bos_token_id=self._tgt_lang_token_id,
+                    max_length=self._max_length,
+                    num_beams=self._num_beams,
+                )
+
+            translations.extend(
+                self.tokenizer.batch_decode(translated_tokens, skip_special_tokens=True)
+            )
+        return [t.strip() for t in translations]
 
     def translate_batch(self, texts: list[str]) -> list[str]:
-        return [self._translate_text(text) for text in texts]
+        text_segments: list[list[str]] = [
+            _segment_text(text, chunk_size=self._chunk_size) for text in texts
+        ]
+        flat_segments = [segment for segments in text_segments for segment in segments]
+        flat_translations = self._translate_segments_batched(flat_segments)
+
+        results: list[str] = []
+        cursor = 0
+        for segments in text_segments:
+            n = len(segments)
+            if n == 0:
+                results.append("")
+                continue
+            chunk = flat_translations[cursor : cursor + n]
+            cursor += n
+            results.append(" ".join(part for part in chunk if part).strip())
+        return results
 
 
 # ─────────────────────────────────────────────────────────────────────────────

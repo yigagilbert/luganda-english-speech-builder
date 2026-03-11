@@ -42,8 +42,14 @@ Usage
     # Process only the validated split
     python common_voice_24_luganda.py --splits validated
 
-    # Push to Hub after processing
-    python common_voice_24_luganda.py --push-to-hub your-org/cv24-luganda
+    # Push lug-only dataset to Hub after processing
+    python common_voice_24_luganda.py --push-to-hub --hub-repo-id your-org/cv24-luganda
+
+    # Build bilingual dataset and push to a different Hub repo
+    python common_voice_24_luganda.py \
+        --run-general-steps \
+        --push-paired-to-hub \
+        --paired-hub-repo-id your-org/cv24-lug-eng
 
     # Dry-run: print stats only, no output saved
     python common_voice_24_luganda.py --dry-run
@@ -51,18 +57,16 @@ Usage
 
 from __future__ import annotations
 
-import hashlib
 import io
 import logging
 import os
 import sys
 import tarfile
-import time
 import unicodedata
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Callable
 
 import click
 import numpy as np
@@ -70,6 +74,7 @@ import pandas as pd
 import torch
 import torchaudio
 import torchaudio.functional as AF
+import yaml
 from datasets import Audio, Dataset
 from dotenv import load_dotenv
 from rich.console import Console
@@ -111,6 +116,7 @@ class Config:
     data_dir: Path = Path("data/cv24_luganda")
     archive_name: str = "mcv-scripted-lg-v24.0.tar.gz"
     output_dir: Path = Path("data/cv24_luganda/processed")
+    paired_output_dir: Path | None = None
 
     # --- Download (filled at runtime from env or CLI) ---
     download_url: str = ""          # Set via --download-url or CV24_DOWNLOAD_URL env var
@@ -143,6 +149,16 @@ class Config:
     # --- Misc ---
     dry_run: bool = False
     id_prefix: str = "cv24_lg"
+    run_general_steps: bool = False
+    pipeline_config: str = "config/config.yaml"
+
+    # --- Bilingual (general pipeline stages) Hub ---
+    push_paired_to_hub: bool = False
+    paired_hub_repo_id: str = ""
+    paired_hub_private: bool = True
+
+    # --- Optional test/runtime overrides ---
+    _clips_dir_override: Path | None = None
 
     @property
     def archive_path(self) -> Path:
@@ -155,7 +171,13 @@ class Config:
     @property
     def clips_dir(self) -> Path:
         # Common Voice archives unpack to a language-code subdirectory
+        if self._clips_dir_override is not None:
+            return self._clips_dir_override
         return self.extract_dir / "lg" / "clips"
+
+    @clips_dir.setter
+    def clips_dir(self, value: Path | str) -> None:
+        self._clips_dir_override = Path(value)
 
     @property
     def tsv_dir(self) -> Path:
@@ -593,6 +615,26 @@ def print_stats(df_meta: pd.DataFrame, records: list[dict], cfg: Config) -> None
     console.print(table)
 
 
+def _print_overall_progress(completed: int, total: int, current_step: str) -> None:
+    """
+    Print a high-level progress bar for end-to-end processing.
+    This is static (line-per-update) so it does not conflict with nested Rich
+    progress bars used by download/extract/audio stages.
+    """
+    if total <= 0:
+        return
+
+    width = 40
+    ratio = min(1.0, max(0.0, completed / total))
+    filled = int(width * ratio)
+    bar = "#" * filled + "-" * (width - filled)
+    pct = ratio * 100
+    console.print(
+        f"[bold cyan]Overall Progress[/bold cyan] "
+        f"[{bar}] {completed}/{total} ({pct:.1f}%) — {current_step}"
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Hub push
 # ─────────────────────────────────────────────────────────────────────────────
@@ -610,6 +652,170 @@ def push_to_hub(ds: Dataset, cfg: Config, hf_token: str | None) -> None:
         max_shard_size="2GB",
     )
     log.info(f"[green]✓ Dataset available at: https://huggingface.co/datasets/{cfg.hub_repo_id}[/green]")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Optional: run general pipeline stages (Translation → TTS → Assembly)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _resolve_pipeline_config_path(config_path: str) -> Path | None:
+    direct = Path(config_path)
+    if direct.exists():
+        return direct
+
+    repo_relative = Path(__file__).resolve().parent.parent / config_path
+    if repo_relative.exists():
+        return repo_relative
+
+    default_repo_cfg = Path(__file__).resolve().parent.parent / "config" / "config.yaml"
+    if default_repo_cfg.exists():
+        return default_repo_cfg
+
+    return None
+
+
+def _default_general_stage_cfg(target_sr: int) -> dict[str, Any]:
+    return {
+        "audio": {"sample_rate": target_sr},
+        "translation": {
+            "backend": "nllb",
+            "model": "facebook/nllb-200-distilled-600M",
+            "src_lang": "lug_Latn",
+            "tgt_lang": "eng_Latn",
+            "batch_size": 16,
+            "max_length": 100,
+            "dtype": "float32",
+            "device": "auto",
+            "num_beams": 4,
+        },
+        "tts": {
+            "backend": "speecht5",
+            "batch_size": 16,
+            "vocoder": "microsoft/speecht5_hifigan",
+            "speaker_embeddings": "Matthijs/cmu-arctic-xvectors",
+            "speaker_id": 7306,
+            "device": "auto",
+        },
+        "hub": {
+            "repo_id": "",
+            "private": True,
+            "max_shard_size": "2GB",
+            "push_to_hub": False,
+        },
+    }
+
+
+def _build_general_stage_cfg(cfg: Config) -> dict[str, Any]:
+    stage_cfg = _default_general_stage_cfg(cfg.target_sr)
+    cfg_path = _resolve_pipeline_config_path(cfg.pipeline_config)
+
+    if cfg_path is not None:
+        try:
+            loaded = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+            if isinstance(loaded, dict):
+                stage_cfg = _deep_merge(stage_cfg, loaded)
+                log.info(f"Loaded pipeline config for general steps: {cfg_path}")
+            else:
+                log.warning(f"Pipeline config is not a dict: {cfg_path}. Using defaults.")
+        except Exception as exc:
+            log.warning(f"Could not parse pipeline config ({cfg_path}): {exc}. Using defaults.")
+    else:
+        log.warning("No pipeline config found. Using built-in translation/TTS defaults.")
+
+    paired_root = cfg.paired_output_dir or (cfg.output_dir / "paired_general_steps")
+    stage_cfg["paths"] = {
+        "filtered": str(paired_root / "filtered"),
+        "translated": str(paired_root / "translated"),
+        "synthesized": str(paired_root / "synthesized"),
+        "final": str(paired_root / "final"),
+    }
+
+    # Force sample rate to match this CV24 processor output.
+    stage_cfg.setdefault("audio", {})
+    stage_cfg["audio"]["sample_rate"] = cfg.target_sr
+
+    stage_cfg.setdefault("hub", {})
+    stage_cfg["hub"]["push_to_hub"] = cfg.push_paired_to_hub
+    stage_cfg["hub"]["private"] = cfg.paired_hub_private
+    stage_cfg["hub"]["max_shard_size"] = stage_cfg["hub"].get("max_shard_size", "2GB")
+    if cfg.paired_hub_repo_id:
+        stage_cfg["hub"]["repo_id"] = cfg.paired_hub_repo_id
+
+    if cfg.push_paired_to_hub and not stage_cfg["hub"].get("repo_id"):
+        log.error(
+            "--push-paired-to-hub requires a repo id. Set --paired-hub-repo-id "
+            "or provide hub.repo_id in pipeline config."
+        )
+        sys.exit(1)
+
+    return stage_cfg
+
+
+def run_general_pipeline_steps(
+    ds_lug_only: Dataset,
+    cfg: Config,
+    hf_token: str | None,
+    on_step_done: Callable[[str], None] | None = None,
+) -> tuple[Dataset, Path]:
+    """
+    Run the shared Luganda pipeline stages on top of the CV24 lug-only output:
+      Stage 4 (translation) -> Stage 5 (TTS) -> Stage 6 (assembly)
+
+    Returns
+    -------
+    (final_bilingual_dataset, final_dataset_path)
+    """
+    try:
+        from luganda_pipeline.assembly.build import run_assembly
+        from luganda_pipeline.translation.translate import run_translation
+        from luganda_pipeline.tts.synthesize import run_tts
+    except Exception as exc:
+        log.error(
+            "Failed to import general pipeline stages. "
+            "Ensure the repo dependencies are installed."
+        )
+        raise SystemExit(1) from exc
+
+    stage_cfg = _build_general_stage_cfg(cfg)
+    filtered_input_path = Path(stage_cfg["paths"]["filtered"]) / "filtered_dataset"
+    filtered_input_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # The general pipeline expects Stage 3 output at paths.filtered/filtered_dataset.
+    seed_ds = ds_lug_only.select_columns(["audio_lug", "text_lug"])
+    log.info(f"Saving general-steps seed dataset → {filtered_input_path}")
+    seed_ds.save_to_disk(str(filtered_input_path))
+
+    console.rule("[bold]General Step A — Translation (text_lug -> text_eng)[/bold]")
+    run_translation(stage_cfg)
+    if on_step_done:
+        on_step_done("General Step A — Translation")
+
+    console.rule("[bold]General Step B — TTS (text_eng -> audio_eng)[/bold]")
+    run_tts(stage_cfg)
+    if on_step_done:
+        on_step_done("General Step B — TTS")
+
+    console.rule("[bold]General Step C — Assembly (final bilingual schema)[/bold]")
+    final_ds = run_assembly(stage_cfg, hf_token=hf_token)
+    if on_step_done:
+        on_step_done("General Step C — Assembly")
+    final_path = Path(stage_cfg["paths"]["final"]) / "final_dataset"
+
+    if cfg.push_paired_to_hub:
+        repo_id = stage_cfg["hub"]["repo_id"]
+        log.info(f"[green]✓ Bilingual dataset pushed to:[/green] https://huggingface.co/datasets/{repo_id}")
+
+    return final_ds, final_path
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -636,6 +842,12 @@ def push_to_hub(ds: Dataset, cfg: Config, hf_token: str | None) -> None:
 @click.option("--push-to-hub",      "do_push",    is_flag=True, default=False,  help="Push final dataset to HuggingFace Hub.")
 @click.option("--hub-repo-id",      default="",   help="HuggingFace Hub repo ID (e.g. your-org/cv24-luganda).")
 @click.option("--hub-private/--hub-public", default=True, show_default=True, help="Make Hub repo private.")
+@click.option("--run-general-steps", is_flag=True, default=False, help="After CV24 processing, run translation+tts+assembly to build bilingual schema.")
+@click.option("--pipeline-config",   default="config/config.yaml", show_default=True, help="Path to the main pipeline YAML config used for translation/TTS settings.")
+@click.option("--paired-output-dir", default="", help="Output root for bilingual general-step artifacts (default: <output-dir>/paired_general_steps).")
+@click.option("--push-paired-to-hub", "do_push_paired", is_flag=True, default=False, help="Push the final bilingual dataset to HuggingFace Hub.")
+@click.option("--paired-hub-repo-id", default="", help="HF repo ID for bilingual dataset (e.g. your-org/cv24-lug-eng).")
+@click.option("--paired-hub-private/--paired-hub-public", default=True, show_default=True, help="Make bilingual Hub repo private.")
 @click.option("--dry-run",          is_flag=True, default=False,  help="Print stats without saving anything.")
 @click.option("--id-prefix",        default="cv24_lg", show_default=True, help="Prefix for generated record IDs.")
 def main(
@@ -645,6 +857,8 @@ def main(
     min_duration, max_duration, min_snr, min_text_len, max_text_len,
     target_sr, num_workers,
     do_push, hub_repo_id, hub_private,
+    run_general_steps, pipeline_config, paired_output_dir,
+    do_push_paired, paired_hub_repo_id, paired_hub_private,
     dry_run, id_prefix,
 ):
     """
@@ -676,39 +890,86 @@ def main(
         push_to_hub=do_push,
         hub_repo_id=hub_repo_id,
         hub_private=hub_private,
+        run_general_steps=run_general_steps,
+        pipeline_config=pipeline_config,
+        paired_output_dir=Path(paired_output_dir) if paired_output_dir else None,
+        push_paired_to_hub=do_push_paired,
+        paired_hub_repo_id=paired_hub_repo_id,
+        paired_hub_private=paired_hub_private,
         dry_run=dry_run,
         id_prefix=id_prefix,
     )
+
+    if cfg.push_paired_to_hub and not cfg.run_general_steps:
+        log.error("--push-paired-to-hub requires --run-general-steps.")
+        sys.exit(1)
+
+    planned_steps = [
+        "Download",
+        "Extract",
+        "Load Metadata",
+        "Metadata Quality Filter",
+    ]
+    if cfg.dry_run:
+        planned_steps.append("Dry Run Preview")
+    else:
+        planned_steps.extend(["Audio Processing", "Assemble & Save"])
+        if cfg.push_to_hub:
+            planned_steps.append("Hub Push (Lug-Only)")
+        if cfg.run_general_steps:
+            planned_steps.extend([
+                "General Step A — Translation",
+                "General Step B — TTS",
+                "General Step C — Assembly",
+            ])
+
+    total_steps = len(planned_steps)
+    completed_steps = 0
+    _print_overall_progress(completed_steps, total_steps, "Starting")
+
+    def _complete_step(step_name: str) -> None:
+        nonlocal completed_steps
+        completed_steps += 1
+        _print_overall_progress(completed_steps, total_steps, step_name)
 
     # ── Step 1: Download ────────────────────────────────────────────
     if not skip_download:
         console.rule("[bold]Step 1 / 6 — Download[/bold]")
         download_archive(cfg)
+        _complete_step("Download")
     else:
         log.info("Step 1 skipped (--skip-download)")
+        _complete_step("Download (skipped)")
 
     # ── Step 2: Extract ─────────────────────────────────────────────
     if not skip_extract:
         console.rule("[bold]Step 2 / 6 — Extract[/bold]")
         extract_archive(cfg)
+        _complete_step("Extract")
     else:
         log.info("Step 2 skipped (--skip-extract)")
+        _complete_step("Extract (skipped)")
 
     # ── Step 3: Load & filter metadata ──────────────────────────────
     console.rule("[bold]Step 3 / 6 — Load Metadata[/bold]")
     df_raw = load_all_metadata(cfg)
+    _complete_step("Load Metadata")
 
     console.rule("[bold]Step 4 / 6 — Metadata Quality Filter[/bold]")
     df_filtered = apply_metadata_filters(df_raw, cfg)
+    _complete_step("Metadata Quality Filter")
 
     if dry_run:
         log.info("[yellow]DRY RUN — skipping audio processing and output.[/yellow]")
         console.print(df_filtered[["path", "text", "up_votes", "down_votes", "split"]].head(20).to_string())
+        _complete_step("Dry Run Preview")
+        console.rule("[bold green]✓ Dry run complete[/bold green]")
         return
 
     # ── Step 4: Process audio ────────────────────────────────────────
     console.rule("[bold]Step 5 / 6 — Audio Processing[/bold]")
     records = process_audio_parallel(df_filtered, cfg)
+    _complete_step("Audio Processing")
 
     if not records:
         log.error("No records survived processing. Check filters and audio paths.")
@@ -727,11 +988,24 @@ def main(
     log.info(f"Saving dataset → {save_path}")
     ds.save_to_disk(str(save_path))
     log.info("[green]✓ Dataset saved[/green]")
+    _complete_step("Assemble & Save")
 
     # ── Optional: Push to Hub ────────────────────────────────────────
     if cfg.push_to_hub:
         console.rule("[bold]Hub Push[/bold]")
         push_to_hub(ds, cfg, hf_token)
+        _complete_step("Hub Push (Lug-Only)")
+
+    paired_ds: Dataset | None = None
+    paired_save_path: Path | None = None
+    if cfg.run_general_steps:
+        console.rule("[bold]General Steps — Build Bilingual Dataset[/bold]")
+        paired_ds, paired_save_path = run_general_pipeline_steps(
+            ds,
+            cfg,
+            hf_token,
+            on_step_done=_complete_step,
+        )
 
     # ── Done ─────────────────────────────────────────────────────────
     console.rule("[bold green]✓ Processing complete[/bold green]")
@@ -739,10 +1013,18 @@ def main(
         f"Final dataset: [bold]{len(ds):,}[/bold] examples  "
         f"→  {save_path}"
     )
-    log.info(
-        "Next step: feed this dataset into [bold]Stage 4 — Translation[/bold] "
-        "of the Luganda–English pipeline."
-    )
+    if paired_ds is not None and paired_save_path is not None:
+        log.info(
+            f"Bilingual dataset: [bold]{len(paired_ds):,}[/bold] examples  "
+            f"→  {paired_save_path}"
+        )
+        if cfg.push_paired_to_hub:
+            log.info(f"Bilingual Hub repo: [bold]{cfg.paired_hub_repo_id or 'from pipeline config'}[/bold]")
+    else:
+        log.info(
+            "Next step: run with [bold]--run-general-steps[/bold] to add text_eng/audio_eng "
+            "and produce the full bilingual schema."
+        )
 
 
 if __name__ == "__main__":

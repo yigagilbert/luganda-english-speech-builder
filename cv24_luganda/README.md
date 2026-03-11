@@ -33,6 +33,7 @@ cv24_luganda/
 ├── common_voice_24_luganda.py   ← Main processor (raw archive → HF Dataset)
 ├── common_voice_24_hf_loader.py ← Alternative: pull from HF Hub directly
 ├── requirements.txt
+├── ../scripts/run_cv24_gpu_fast.sh ← GPU-optimized launcher for rented instances
 └── tests/
     └── test_cv24_processor.py
 ```
@@ -61,7 +62,16 @@ python common_voice_24_luganda.py \
     --splits validated \
     --min-up-votes 3 \
     --min-snr 18.0 \
-    --push-to-hub your-org/cv24-luganda
+    --push-to-hub \
+    --hub-repo-id your-org/cv24-luganda
+
+# Build full bilingual schema (audio_lug + text_lug + text_eng + audio_eng)
+# and push it to a DIFFERENT Hugging Face repo:
+python common_voice_24_luganda.py \
+    --splits validated \
+    --run-general-steps \
+    --push-paired-to-hub \
+    --paired-hub-repo-id your-org/cv24-lug-eng
 ```
 
 ### Option B — Pull from HuggingFace Hub
@@ -74,6 +84,35 @@ python common_voice_24_hf_loader.py --splits train,validation
 
 # Stream without full download (slower per-example but no disk pre-req):
 python common_voice_24_hf_loader.py --streaming
+```
+
+### Option C — Rented GPU (fastest path)
+
+```bash
+# 1) Prepare env
+export CV24_DOWNLOAD_URL="https://your-mozilla-signed-url"
+export HF_TOKEN="hf_xxx"
+export PAIRED_REPO_ID="your-org/cv24-lug-eng"     # bilingual final dataset
+# optional
+export LUGANDA_REPO_ID="your-org/cv24-lug-only"    # lug-only intermediate dataset
+
+# 2) Run with GPU-optimized defaults
+bash scripts/run_cv24_gpu_fast.sh
+```
+
+By default this script:
+- uses `splits=validated` (max usable data),
+- runs `--run-general-steps` (translation + TTS + final assembly),
+- pushes paired output to `PAIRED_REPO_ID`,
+- places HF caches on fast local disk (`/mnt/nvme` or `/local` if present),
+- uses `config/config.gpu_fast.yaml` for fast translation/TTS defaults,
+- prints an overall end-to-end terminal progress bar (plus per-step bars).
+
+To use a different config:
+
+```bash
+export PIPELINE_CONFIG="/path/to/your_config.yaml"
+bash scripts/run_cv24_gpu_fast.sh
 ```
 
 ---
@@ -101,6 +140,11 @@ python common_voice_24_hf_loader.py --streaming
 | `--num-workers` | `cpu_count - 1` | Parallel worker processes |
 | `--push-to-hub` | false | Push result to HuggingFace Hub |
 | `--hub-repo-id` | | HF Hub repo ID |
+| `--run-general-steps` | false | Run shared Stage 4/5/6 (translation, TTS, assembly) after CV24 build |
+| `--pipeline-config` | `config/config.yaml` | Main pipeline YAML for translation/TTS settings |
+| `--paired-output-dir` | `<output-dir>/paired_general_steps` | Local output root for bilingual artifacts |
+| `--push-paired-to-hub` | false | Push bilingual final dataset to HuggingFace Hub |
+| `--paired-hub-repo-id` | | HF Hub repo ID for bilingual dataset |
 | `--dry-run` | false | Print stats only, no output saved |
 
 ---
@@ -125,20 +169,51 @@ python common_voice_24_hf_loader.py --streaming
 [6] Assemble      HuggingFace Dataset:  id | audio_lug | text_lug
                   Cast audio_lug to Audio(sampling_rate=16000)
                   Save to disk (Arrow format) + optional Hub push
+
+Optional after step 6 (`--run-general-steps`):
+[7] Translation   text_lug -> text_eng
+[8] TTS           text_eng -> audio_eng
+[9] Assembly      Final bilingual schema:
+                  id | audio_eng | audio_lug | text_eng | text_lug
+                  Save + optional push to a separate HF repo via --paired-hub-repo-id
 ```
 
 ---
 
-## Output Schema
+## Output Schemas
 
+### Base CV24 output
 | Column | Type | Description |
 |---|---|---|
 | `id` | `string` | `cv24_lg_{index:07d}` |
 | `audio_lug` | `Audio(16kHz)` | 16-bit mono WAV bytes |
 | `text_lug` | `string` | NFC-normalised Luganda transcript |
 
-This output is ready to be consumed by **Stage 4 — Translation** of the
-main Luganda–English speech pipeline.
+### Optional bilingual output (`--run-general-steps`)
+| Column | Type | Description |
+|---|---|---|
+| `id` | `string` | Generated final ID (`lug_eng_{index:07d}`) |
+| `audio_eng` | `Audio(16kHz)` | English TTS audio |
+| `audio_lug` | `Audio(16kHz)` | Luganda audio |
+| `text_eng` | `string` | English translation |
+| `text_lug` | `string` | Luganda transcript |
+
+This bilingual output is what gets pushed when you use `--push-paired-to-hub`.
+
+---
+
+## GPU Throughput Tuning (Rented Machines)
+
+For highest throughput:
+- Use an instance with high VRAM and local NVMe (A100 80GB preferred).
+- Keep caches on local NVMe (`HF_HOME`, `HF_DATASETS_CACHE`, `TRANSFORMERS_CACHE`).
+- Start with these config settings in `config/config.yaml` and then scale up:
+  - `translation.batch_size: 32` and `translation.generation_batch_size: 32`
+  - `translation.dtype: bfloat16` (A100/H100) or `float16` (L4/T4)
+  - `translation.compile: true`
+  - `tts.spark_compile: true`
+- Increase `batch_size` gradually until GPU memory is near full but stable.
+- Use `NUM_WORKERS` near vCPU count for CV24 audio preprocessing (set via env in the launcher script).
 
 ---
 

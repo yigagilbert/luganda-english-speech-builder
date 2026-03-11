@@ -1,0 +1,43 @@
+# ============================================================
+#  CV24 General Steps GPU Fast Preset
+#  Used by scripts/run_cv24_gpu_fast.sh unless overridden.
+# ============================================================
+
+audio:
+  sample_rate: 16000
+
+translation:
+  # Fast default for rented GPUs (good speed/quality tradeoff).
+  backend: "nllb"
+  model: "facebook/nllb-200-distilled-600M"
+  src_lang: "lug_Latn"
+  tgt_lang: "eng_Latn"
+  batch_size: 64
+  max_length: 100
+  dtype: "bfloat16"
+  device: "auto"
+  num_beams: 2
+  compile: true
+  allow_tf32: true
+
+tts:
+  # Keep Spark-TTS for high-throughput synthesis on GPU instances.
+  backend: "spark_tts"
+  model: "jq/spark-tts-salt"
+  spark_codec_model: "unsloth/Spark-TTS-0.5B"
+  spark_cache_dir: "data/models/spark_tts"
+  spark_voice_prefix: "248"
+  spark_temperature: 0.8
+  spark_top_k: 50
+  spark_top_p: 1.0
+  spark_max_new_audio_tokens: 2048
+  spark_max_seq_length: 2048
+  spark_compile: true
+  allow_tf32: true
+  batch_size: 64
+  device: "auto"
+
+hub:
+  private: true
+  max_shard_size: "2GB"
+  push_to_hub: false

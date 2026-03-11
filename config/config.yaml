@@ -87,12 +87,16 @@ translation:
   tokenizer_model: "facebook/nllb-200-distilled-1.3B"
   src_lang:   "lug"
   tgt_lang:   "eng"
-  batch_size: 16
+  batch_size: 32
+  generation_batch_size: 32
   chunk_size: 20
+  max_input_length: 256
   max_length: 100
   dtype:      "float32"        # bfloat16 | float16 | float32
   device:     "auto"           # auto | cuda | cpu
   num_beams:  5
+  allow_tf32: true
+  compile:    false
   language_token_ids:
     eng: 256047
     ach: 256111
@@ -113,13 +117,15 @@ tts:
   spark_top_p: 1.0
   spark_max_new_audio_tokens: 2048
   spark_max_seq_length: 2048
+  spark_compile: false
+  allow_tf32: true
   # SpeechT5 fallback settings (used only when backend=speecht5)
   speecht5_model: "microsoft/speecht5_tts"
   vocoder:    "microsoft/speecht5_hifigan"
   speaker_embeddings: "Matthijs/cmu-arctic-xvectors"
   speaker_id: 7306
   output_sample_rate: 22050
-  batch_size: 16
+  batch_size: 64
   device:     "auto"
 
 # ── Dataset assembly & Hub push ──────────────────────────────

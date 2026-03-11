@@ -11,9 +11,6 @@ librosa>=0.10.1
 # ── ASR / VAD ────────────────────────────────────────────────────────────────
 silero-vad>=4.0.0
 
-# ── TTS (fallback) ───────────────────────────────────────────────────────────
-TTS>=0.22.0                   # coqui TTS (optional, heavy dependency)
-
 # ── Translation ──────────────────────────────────────────────────────────────
 sentencepiece>=0.2.0           # required by NLLB tokeniser
 

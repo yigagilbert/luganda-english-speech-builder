@@ -30,6 +30,16 @@ import click
 import yaml
 from dotenv import load_dotenv
 from rich.console import Console
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TaskProgressColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+)
 
 from luganda_pipeline.utils.checkpoint import STAGES, CheckpointManager
 from luganda_pipeline.utils.logging import get_logger, setup_logger
@@ -99,6 +109,17 @@ STAGE_RUNNERS = {
     "assembly":      _run_assembly,
     "qa":            _run_qa,
 }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Progress helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _completed_stage_count(ckpt: CheckpointManager, force: bool) -> int:
+    """Return how many stages should count as already complete."""
+    if force:
+        return 0
+    return sum(1 for s in STAGES if ckpt.is_done(s))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -173,19 +194,42 @@ def main(
     console.rule("[bold]Luganda–English Speech Dataset Pipeline[/bold]")
     console.print(ckpt.summary())
 
-    for s in STAGES:
-        if ckpt.is_done(s) and not force:
-            log.info(f"[dim]Skipping '{s}' (already done)[/dim]")
-            continue
+    initial_completed = _completed_stage_count(ckpt, force=force)
+    progress_columns = [
+        SpinnerColumn(),
+        TextColumn("[bold blue]{task.description}"),
+        BarColumn(bar_width=40),
+        TaskProgressColumn(),
+        MofNCompleteColumn(),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
+    ]
 
-        console.rule(f"[bold cyan]{s.upper()}[/bold cyan]")
-        try:
-            STAGE_RUNNERS[s](cfg=cfg, hf_token=hf_token)
-            ckpt.mark_done(s)
-        except Exception as exc:
-            log.error(f"[red]Stage '{s}' failed: {exc}[/red]")
-            log.error("Pipeline halted. Fix the error and re-run to resume from this stage.")
-            raise SystemExit(1) from exc
+    with Progress(*progress_columns, console=console) as progress:
+        task_id = progress.add_task(
+            "Pipeline Progress",
+            total=len(STAGES),
+            completed=initial_completed,
+        )
+
+        for s in STAGES:
+            if ckpt.is_done(s) and not force:
+                log.info(f"[dim]Skipping '{s}' (already done)[/dim]")
+                progress.update(task_id, description=f"Pipeline Progress (skipped: {s})")
+                continue
+
+            progress.update(task_id, description=f"Pipeline Progress (running: {s})")
+            console.rule(f"[bold cyan]{s.upper()}[/bold cyan]")
+            try:
+                STAGE_RUNNERS[s](cfg=cfg, hf_token=hf_token)
+                ckpt.mark_done(s)
+                progress.advance(task_id)
+                progress.update(task_id, description=f"Pipeline Progress (done: {s})")
+            except Exception as exc:
+                progress.update(task_id, description=f"Pipeline Progress (failed: {s})")
+                log.error(f"[red]Stage '{s}' failed: {exc}[/red]")
+                log.error("Pipeline halted. Fix the error and re-run to resume from this stage.")
+                raise SystemExit(1) from exc
 
     console.rule("[green bold]✓ Pipeline complete[/green bold]")
     log.info("Final dataset is in: " + cfg["paths"]["final"])
