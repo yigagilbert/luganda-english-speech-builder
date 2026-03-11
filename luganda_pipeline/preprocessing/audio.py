@@ -12,10 +12,13 @@ For every record:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 import torch
+import torchaudio
+import torchaudio.functional as F
 from datasets import Audio, Dataset
 
 from luganda_pipeline.utils.audio_utils import (
@@ -36,6 +39,102 @@ _vad_model: Any = None
 _vad_utils: Any = None
 
 
+def _prepare_waveform(audio_array: Any, sr: int, target_sr: int) -> tuple[torch.Tensor, int]:
+    """
+    Convert decoded audio arrays/tensors to mono float32 waveform at target_sr.
+    """
+    waveform = torch.as_tensor(audio_array, dtype=torch.float32)
+    if waveform.ndim == 1:
+        waveform = waveform.unsqueeze(0)
+    elif waveform.ndim == 2:
+        # Handle either (channels, time) or (time, channels).
+        if waveform.shape[0] > 8 and waveform.shape[1] <= 8:
+            waveform = waveform.transpose(0, 1)
+    else:
+        raise ValueError(f"Unsupported audio tensor shape: {tuple(waveform.shape)}")
+
+    if waveform.shape[0] > 1:
+        waveform = waveform.mean(dim=0, keepdim=True)
+
+    if sr != target_sr:
+        waveform = F.resample(waveform, sr, target_sr)
+        sr = target_sr
+
+    return waveform, sr
+
+
+def _decode_audio_item(audio_item: Any, target_sr: int) -> tuple[torch.Tensor, int]:
+    """
+    Decode dataset audio cell to waveform + sr.
+    Supports:
+      - dict items: {"bytes"/"array"/"path", ...}
+      - datasets AudioDecoder-like objects with get_all_samples()
+    """
+    if audio_item is None:
+        raise ValueError("audio item is None")
+
+    # Case 1: legacy dict payloads.
+    if isinstance(audio_item, Mapping):
+        raw_bytes = audio_item.get("bytes")
+        if raw_bytes:
+            return load_audio_bytes(raw_bytes, target_sr=target_sr)
+
+        audio_array = audio_item.get("array")
+        if audio_array is not None:
+            sr = int(audio_item.get("sampling_rate") or target_sr)
+            return _prepare_waveform(audio_array, sr=sr, target_sr=target_sr)
+
+        audio_path = audio_item.get("path")
+        if audio_path:
+            waveform, sr = torchaudio.load(audio_path)
+            if waveform.shape[0] > 1:
+                waveform = waveform.mean(dim=0, keepdim=True)
+            if sr != target_sr:
+                waveform = F.resample(waveform, sr, target_sr)
+                sr = target_sr
+            return waveform, sr
+
+        raise ValueError("dict audio item missing bytes/array/path")
+
+    # Case 2: AudioDecoder-like objects from datasets.
+    get_all_samples = getattr(audio_item, "get_all_samples", None)
+    if callable(get_all_samples):
+        decoded = get_all_samples()
+
+        audio_array = getattr(decoded, "data", None)
+        if audio_array is None:
+            audio_array = getattr(decoded, "array", None)
+        if audio_array is None and isinstance(decoded, Mapping):
+            audio_array = decoded.get("data") or decoded.get("array")
+        if audio_array is None and isinstance(decoded, torch.Tensor):
+            audio_array = decoded
+
+        sr = (
+            getattr(decoded, "sample_rate", None)
+            or getattr(audio_item, "sampling_rate", None)
+            or target_sr
+        )
+        if audio_array is None:
+            raise ValueError("AudioDecoder returned samples without data/array")
+        return _prepare_waveform(audio_array, sr=int(sr), target_sr=target_sr)
+
+    # Case 3: object already exposing array/sampling_rate.
+    audio_array = getattr(audio_item, "array", None)
+    if audio_array is not None:
+        sr = int(getattr(audio_item, "sampling_rate", target_sr))
+        return _prepare_waveform(audio_array, sr=sr, target_sr=target_sr)
+
+    # Case 4: decode() returns dict/decoder payload in some datasets versions.
+    decode_fn = getattr(audio_item, "decode", None)
+    if callable(decode_fn):
+        decoded = decode_fn()
+        if decoded is audio_item:
+            raise ValueError(f"Unsupported audio item type: {type(audio_item)}")
+        return _decode_audio_item(decoded, target_sr=target_sr)
+
+    raise ValueError(f"Unsupported audio item type: {type(audio_item)}")
+
+
 def _get_vad():
     global _vad_model, _vad_utils
     if _vad_model is None:
@@ -45,6 +144,7 @@ def _get_vad():
             model="silero_vad",
             force_reload=False,
             onnx=False,
+            trust_repo=True,
         )
     return _vad_model, _vad_utils
 
@@ -114,14 +214,8 @@ def _preprocess_batch(
     keep_mask: list[bool] = []
 
     for audio_item in batch["audio_lug"]:
-        raw_bytes: bytes = audio_item.get("bytes") or b""
-        if not raw_bytes:
-            keep_mask.append(False)
-            new_audio.append(None)
-            continue
-
         try:
-            waveform, sr = load_audio_bytes(raw_bytes, target_sr=target_sr)
+            waveform, sr = _decode_audio_item(audio_item, target_sr=target_sr)
         except Exception as exc:
             log.debug(f"Audio decode failed: {exc}")
             keep_mask.append(False)

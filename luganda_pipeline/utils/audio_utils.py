@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import wave
 from typing import Optional
 
 import numpy as np
@@ -58,11 +59,22 @@ def tensor_to_bytes(waveform: torch.Tensor, sample_rate: int = 16_000) -> bytes:
     if waveform.dim() == 1:
         waveform = waveform.unsqueeze(0)
 
-    # Clamp and convert to int16
-    waveform_int16 = (waveform.clamp(-1.0, 1.0) * 32767).to(torch.int16)
+    # Keep mono output for pipeline consistency.
+    if waveform.shape[0] > 1:
+        waveform = waveform.mean(dim=0, keepdim=True)
 
+    # Clamp and convert to int16 PCM.
+    waveform_int16 = (waveform.clamp(-1.0, 1.0) * 32767).to(torch.int16).cpu()
+    pcm_bytes = waveform_int16.squeeze(0).contiguous().numpy().tobytes()
+
+    # Use stdlib wave writer to avoid backend-specific torchaudio save issues.
     buf = io.BytesIO()
-    torchaudio.save(buf, waveform_int16, sample_rate, format="wav", bits_per_sample=16)
+    with wave.open(buf, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)  # int16 PCM
+        wav_file.setframerate(int(sample_rate))
+        wav_file.writeframes(pcm_bytes)
+
     return buf.getvalue()
 
 

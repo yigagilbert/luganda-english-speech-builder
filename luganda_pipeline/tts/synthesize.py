@@ -12,17 +12,16 @@ Produces the ``audio_eng`` column as 16-bit mono WAV bytes at 16 kHz.
 
 from __future__ import annotations
 
-import io
 import os
 import re
 from pathlib import Path
 from typing import Any
 
 import torch
-import torchaudio
 import torchaudio.functional as F
 from datasets import Audio, Dataset
 
+from luganda_pipeline.utils.audio_utils import tensor_to_bytes
 from luganda_pipeline.utils.logging import get_logger
 
 log = get_logger(__name__)
@@ -104,11 +103,7 @@ class SpeechT5Synthesizer:
         if self.NATIVE_SR != self._target_sr:
             speech = F.resample(speech, self.NATIVE_SR, self._target_sr)
 
-        # Encode to int16 WAV bytes
-        speech_i16 = (speech.clamp(-1.0, 1.0) * 32767).to(torch.int16)
-        buf = io.BytesIO()
-        torchaudio.save(buf, speech_i16, self._target_sr, format="wav", bits_per_sample=16)
-        return buf.getvalue()
+        return tensor_to_bytes(speech, sample_rate=self._target_sr)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -270,10 +265,7 @@ class SparkTTSSynthesizer:
         if self._native_sr != self._target_sr:
             speech = F.resample(speech, self._native_sr, self._target_sr)
 
-        speech_i16 = (speech.clamp(-1.0, 1.0) * 32767).to(torch.int16)
-        buf = io.BytesIO()
-        torchaudio.save(buf, speech_i16, self._target_sr, format="wav", bits_per_sample=16)
-        return buf.getvalue()
+        return tensor_to_bytes(speech, sample_rate=self._target_sr)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

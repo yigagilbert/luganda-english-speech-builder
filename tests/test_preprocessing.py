@@ -60,3 +60,36 @@ def test_estimate_snr_on_sine():
     wave = (0.5 * torch.sin(2 * 3.14159 * 440 * t)).unsqueeze(0)
     snr = estimate_snr(wave, sr=16_000)
     assert snr > 10.0
+
+
+def test_preprocess_decode_audio_item_dict_bytes():
+    from luganda_pipeline.preprocessing.audio import _decode_audio_item
+
+    wav = _make_wav_bytes(sr=22_050)
+    waveform, sr = _decode_audio_item({"bytes": wav, "path": None}, target_sr=16_000)
+    assert sr == 16_000
+    assert waveform.shape[0] == 1
+    assert waveform.shape[1] > 0
+
+
+def test_preprocess_decode_audio_item_audio_decoder_like():
+    from luganda_pipeline.preprocessing.audio import _decode_audio_item
+
+    class _FakeSamples:
+        def __init__(self, data, sample_rate):
+            self.data = data
+            self.sample_rate = sample_rate
+
+    class _FakeAudioDecoder:
+        def __init__(self, data, sample_rate):
+            self._data = data
+            self._sample_rate = sample_rate
+
+        def get_all_samples(self):
+            return _FakeSamples(self._data, self._sample_rate)
+
+    mono = torch.randn(16_000)
+    decoder = _FakeAudioDecoder(mono, 16_000)
+    waveform, sr = _decode_audio_item(decoder, target_sr=16_000)
+    assert sr == 16_000
+    assert waveform.shape == (1, 16_000)
