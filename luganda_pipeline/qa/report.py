@@ -11,9 +11,13 @@ Generates:
 from __future__ import annotations
 
 import random
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
+import torch
+import torchaudio
 from datasets import Dataset
 
 from luganda_pipeline.utils.audio_utils import get_duration_s
@@ -26,6 +30,99 @@ log = get_logger(__name__)
 #  Stats collection
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _num_frames(audio_data: Any) -> int:
+    """Estimate number of frames from 1D/2D audio containers."""
+    if audio_data is None:
+        return 0
+    if isinstance(audio_data, torch.Tensor):
+        if audio_data.ndim == 1:
+            return int(audio_data.shape[0])
+        if audio_data.ndim == 2:
+            if audio_data.shape[0] > 8 and audio_data.shape[1] <= 8:
+                return int(audio_data.shape[0])
+            return int(audio_data.shape[1])
+        return 0
+    try:
+        if hasattr(audio_data, "shape"):
+            shape = tuple(audio_data.shape)
+            if len(shape) == 1:
+                return int(shape[0])
+            if len(shape) == 2:
+                if shape[0] > 8 and shape[1] <= 8:
+                    return int(shape[0])
+                return int(shape[1])
+        return int(len(audio_data))
+    except Exception:
+        return 0
+
+
+def _duration_from_audio_item(audio_item: Any, default_sr: int = 16_000) -> float:
+    """
+    Compute duration from dataset audio cells supporting dicts and AudioDecoder objects.
+    """
+    if audio_item is None:
+        return 0.0
+
+    if isinstance(audio_item, Mapping):
+        raw_bytes = audio_item.get("bytes")
+        if raw_bytes:
+            try:
+                return float(get_duration_s(raw_bytes))
+            except Exception:
+                return 0.0
+
+        audio_array = audio_item.get("array")
+        if audio_array is not None:
+            sr = int(audio_item.get("sampling_rate") or default_sr)
+            frames = _num_frames(audio_array)
+            return (frames / sr) if sr > 0 else 0.0
+
+        audio_path = audio_item.get("path")
+        if audio_path:
+            try:
+                info = torchaudio.info(audio_path)
+                return float(info.num_frames / info.sample_rate) if info.sample_rate else 0.0
+            except Exception:
+                return 0.0
+
+        return 0.0
+
+    get_all_samples = getattr(audio_item, "get_all_samples", None)
+    if callable(get_all_samples):
+        try:
+            decoded = get_all_samples()
+            data = getattr(decoded, "data", None)
+            if data is None:
+                data = getattr(decoded, "array", None)
+            if data is None and isinstance(decoded, Mapping):
+                data = decoded.get("data") or decoded.get("array")
+            frames = _num_frames(data)
+            sr = (
+                getattr(decoded, "sample_rate", None)
+                or getattr(audio_item, "sampling_rate", None)
+                or default_sr
+            )
+            return (frames / int(sr)) if int(sr) > 0 else 0.0
+        except Exception:
+            return 0.0
+
+    audio_array = getattr(audio_item, "array", None)
+    if audio_array is not None:
+        sr = int(getattr(audio_item, "sampling_rate", default_sr))
+        frames = _num_frames(audio_array)
+        return (frames / sr) if sr > 0 else 0.0
+
+    audio_path = getattr(audio_item, "path", None)
+    if audio_path:
+        try:
+            info = torchaudio.info(audio_path)
+            return float(info.num_frames / info.sample_rate) if info.sample_rate else 0.0
+        except Exception:
+            return 0.0
+
+    return 0.0
+
+
 def collect_stats(ds: Dataset, sample_rate: int = 16_000) -> pd.DataFrame:
     """
     Compute per-record stats and return as a DataFrame.
@@ -33,11 +130,7 @@ def collect_stats(ds: Dataset, sample_rate: int = 16_000) -> pd.DataFrame:
     """
     rows = []
     for item in ds:
-        audio_bytes = (item.get("audio_lug") or {}).get("bytes") or b""
-        try:
-            dur = get_duration_s(audio_bytes) if audio_bytes else 0.0
-        except Exception:
-            dur = 0.0
+        dur = _duration_from_audio_item(item.get("audio_lug"), default_sr=sample_rate)
 
         t_lug = str(item.get("text_lug") or "")
         t_eng = str(item.get("text_eng") or "")

@@ -1,0 +1,54 @@
+# ============================================================
+#  CV24 General Steps GPU Accurate Preset
+#  Higher translation quality, slower throughput.
+# ============================================================
+
+audio:
+  sample_rate: 16000
+
+translation:
+  backend: "nllb_custom"
+  model: "jq/nllb-1.3B-many-to-many-pronouncorrection-charaug"
+  tokenizer_model: "facebook/nllb-200-distilled-1.3B"
+  src_lang: "lug"
+  tgt_lang: "eng"
+  batch_size: 24
+  generation_batch_size: 24
+  chunk_size: 20
+  max_input_length: 256
+  max_length: 100
+  dtype: "float32"
+  device: "auto"
+  num_beams: 5
+  compile: false
+  allow_tf32: true
+  language_token_ids:
+    eng: 256047
+    ach: 256111
+    lgg: 256008
+    lug: 256110
+    nyn: 256002
+    teo: 256006
+
+tts:
+  backend: "spark_tts"
+  model: "jq/spark-tts-salt"
+  spark_repo_path: "Spark-TTS"
+  spark_codec_model: "unsloth/Spark-TTS-0.5B"
+  spark_cache_dir: "data/models/spark_tts"
+  spark_voice_prefix: "248"
+  spark_force_voice_prefix: true
+  spark_temperature: 0.75
+  spark_top_k: 40
+  spark_top_p: 0.95
+  spark_max_new_audio_tokens: 2048
+  spark_max_seq_length: 2048
+  spark_compile: false
+  allow_tf32: true
+  batch_size: 48
+  device: "auto"
+
+hub:
+  private: true
+  max_shard_size: "2GB"
+  push_to_hub: false

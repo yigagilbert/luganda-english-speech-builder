@@ -2,21 +2,17 @@
 
 from __future__ import annotations
 
-import io
-
 import pytest
 import torch
-import torchaudio
 
 
 def _make_wav_bytes(duration_s: float = 2.0, sr: int = 16_000) -> bytes:
     """Generate a simple sine-wave WAV as bytes for testing."""
+    from luganda_pipeline.utils.audio_utils import tensor_to_bytes
+
     t = torch.linspace(0, duration_s, int(sr * duration_s))
     wave = (0.5 * torch.sin(2 * 3.14159 * 440 * t)).unsqueeze(0)
-    wave_i16 = (wave * 32767).to(torch.int16)
-    buf = io.BytesIO()
-    torchaudio.save(buf, wave_i16, sr, format="wav")
-    return buf.getvalue()
+    return tensor_to_bytes(wave, sample_rate=sr)
 
 
 def test_load_audio_bytes_resamples():

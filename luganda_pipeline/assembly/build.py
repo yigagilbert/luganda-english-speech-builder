@@ -14,7 +14,9 @@ Steps:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 from datasets import Audio, Dataset
 
@@ -45,6 +47,58 @@ def assign_ids(ds: Dataset, prefix: str = "lug_eng") -> Dataset:
 #  Schema validation
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _audio_item_has_payload(item: Any) -> bool:
+    """
+    Return True if an audio cell appears to contain data.
+    Supports both dict payloads and datasets AudioDecoder-like objects.
+    """
+    if item is None:
+        return False
+
+    if isinstance(item, Mapping):
+        if item.get("bytes"):
+            return True
+        if item.get("path"):
+            return True
+        arr = item.get("array")
+        if arr is not None:
+            try:
+                return len(arr) > 0
+            except Exception:
+                return True
+        return False
+
+    get_all_samples = getattr(item, "get_all_samples", None)
+    if callable(get_all_samples):
+        try:
+            decoded = get_all_samples()
+            data = getattr(decoded, "data", None)
+            if data is None:
+                data = getattr(decoded, "array", None)
+            if data is None and isinstance(decoded, Mapping):
+                data = decoded.get("data") or decoded.get("array")
+            if data is None:
+                return True
+            try:
+                return len(data) > 0
+            except Exception:
+                return True
+        except Exception:
+            return False
+
+    path = getattr(item, "path", None)
+    if path:
+        return True
+    arr = getattr(item, "array", None)
+    if arr is not None:
+        try:
+            return len(arr) > 0
+        except Exception:
+            return True
+
+    return True
+
+
 def validate_schema(ds: Dataset, sample_rate: int = 16_000) -> None:
     """
     Assert the final dataset satisfies all schema requirements.
@@ -68,7 +122,7 @@ def validate_schema(ds: Dataset, sample_rate: int = 16_000) -> None:
 
     # 4. No null audio
     for col in ("audio_lug", "audio_eng"):
-        nulls = sum(1 for item in ds[col] if item is None or not item.get("bytes"))
+        nulls = sum(1 for item in ds[col] if not _audio_item_has_payload(item))
         assert nulls == 0, f"Found {nulls} null audio items in column '{col}'"
 
     log.info("[green]  ✓ Schema validation passed[/green]")

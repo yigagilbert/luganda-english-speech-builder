@@ -12,8 +12,10 @@ Produces the ``audio_eng`` column as 16-bit mono WAV bytes at 16 kHz.
 
 from __future__ import annotations
 
+import importlib
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +25,11 @@ from datasets import Audio, Dataset
 
 from luganda_pipeline.utils.audio_utils import tensor_to_bytes
 from luganda_pipeline.utils.logging import get_logger
+from sparktts.models.audio_tokenizer import BiCodecTokenizer
+from sparktts.utils.audio import audio_volume_normalize
+import transformers
+from huggingface_hub import snapshot_download
+
 
 log = get_logger(__name__)
 
@@ -118,16 +125,11 @@ class SparkTTSSynthesizer:
 
     _SEMANTIC_TOKEN_RE = re.compile(r"<\|bicodec_semantic_(\d+)\|>")
     _GLOBAL_TOKEN_RE = re.compile(r"<\|bicodec_global_(\d+)\|>")
+    _SPEAKER_PREFIX_RE = re.compile(r"^\s*\d+\s*:\s*")
 
     def __init__(self, cfg: dict) -> None:
-        try:
-            from sparktts.models.audio_tokenizer import BiCodecTokenizer
-        except ImportError as exc:
-            raise ImportError(
-                "Spark-TTS backend requires `sparktts` to be installed and importable."
-            ) from exc
-
         tts_cfg = cfg["tts"]
+        # BiCodecTokenizer = self._load_bicodec_tokenizer_cls(tts_cfg)
         device_str = tts_cfg.get("device", "auto")
         if device_str == "auto":
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -136,25 +138,35 @@ class SparkTTSSynthesizer:
 
         self._target_sr = cfg["audio"]["sample_rate"]
         self._voice_prefix = str(tts_cfg.get("spark_voice_prefix", "248")).strip()
+        self._force_voice_prefix = bool(tts_cfg.get("spark_force_voice_prefix", True))
         self._temperature = float(tts_cfg.get("spark_temperature", 0.8))
         self._top_k = int(tts_cfg.get("spark_top_k", 50))
         self._top_p = float(tts_cfg.get("spark_top_p", 1.0))
         self._max_new_audio_tokens = int(tts_cfg.get("spark_max_new_audio_tokens", 2048))
         self._max_seq_length = int(tts_cfg.get("spark_max_seq_length", 2048))
 
-        cache_root = Path(tts_cfg.get("spark_cache_dir", "data/models/spark_tts"))
-        cache_root.mkdir(parents=True, exist_ok=True)
+        # cache_root = Path(tts_cfg.get("spark_cache_dir", "data/models/spark_tts"))
+        # cache_root.mkdir(parents=True, exist_ok=True)
 
-        model_ref = tts_cfg.get("model", "jq/spark-tts-salt")
-        codec_ref = tts_cfg.get("spark_codec_model", "unsloth/Spark-TTS-0.5B")
+        # model_ref = tts_cfg.get("model", "jq/spark-tts-salt")
+        # codec_ref = tts_cfg.get("spark_codec_model", "unsloth/Spark-TTS-0.5B")
 
-        llm_root = self._resolve_model_ref(model_ref, cache_root / "llm")
-        llm_model_path = llm_root / "LLM" if (llm_root / "LLM").exists() else llm_root
-        codec_path = self._resolve_model_ref(codec_ref, cache_root / "codec")
+        # llm_root = self._resolve_model_ref(model_ref, cache_root / "llm")
+        # llm_model_path = llm_root / "LLM" if (llm_root / "LLM").exists() else llm_root
+        # codec_path = self._resolve_model_ref(codec_ref, cache_root / "codec")
 
-        log.info(f"Loading Spark-TTS LLM from {llm_model_path} on {self.device}")
-        self.model, self.tokenizer = self._load_spark_llm(str(llm_model_path))
-        self.audio_tokenizer = BiCodecTokenizer(str(codec_path), str(self.device))
+        # log.info(f"Loading Spark-TTS LLM from {llm_model_path} on {self.device}")
+        self.model = transformers.AutoModelForCausalLM.from_pretrained(
+            "jq/spark-tts-salt",
+            device_map='auto',
+            torch_dtype="auto",
+        )
+        self.tokenizer = transformers.AutoTokenizer.from_pretrained("jq/spark-tts-salt")
+        # self.model, self.tokenizer = self._load_spark_llm(str(llm_model_path))
+        snapshot_download(
+            "unsloth/Spark-TTS-0.5B", local_dir = "Spark-TTS-0.5B",
+            ignore_patterns=["*LLM*"])
+        self.audio_tokenizer = BiCodecTokenizer("Spark-TTS-0.5B", "cuda")
         self._native_sr = int(self.audio_tokenizer.config.get("sample_rate", 24_000))
 
         if self.device.type == "cuda" and tts_cfg.get("allow_tf32", True):
@@ -165,6 +177,80 @@ class SparkTTSSynthesizer:
                 self.model = torch.compile(self.model)
             except Exception as exc:
                 log.warning(f"Spark torch.compile disabled due to runtime error: {exc}")
+
+    @staticmethod
+    def _load_bicodec_tokenizer_cls(tts_cfg: dict):
+        """
+        Import BiCodecTokenizer, auto-adding local Spark-TTS clone paths if needed.
+        """
+        import_errors: list[str] = []
+        try:
+            mod = importlib.import_module("sparktts.models.audio_tokenizer")
+            return mod.BiCodecTokenizer
+        except Exception as exc:
+            import_errors.append(f"default import failed: {type(exc).__name__}: {exc}")
+
+        # Environment variable should override config for easier runtime fixes.
+        configured_repo_env = os.environ.get("SPARK_TTS_REPO")
+        configured_repo_cfg = tts_cfg.get("spark_repo_path")
+        project_root = Path(__file__).resolve().parents[2]
+        raw_candidates = [
+            configured_repo_env,
+            configured_repo_cfg,
+            str(Path.cwd() / "Spark-TTS"),
+            str(Path.cwd() / "spark-tts"),
+            str(project_root / "Spark-TTS"),
+            str(project_root.parent / "Spark-TTS"),
+        ]
+
+        # Expand candidate roots to handle nested clone folders.
+        seen_candidates: set[str] = set()
+        candidates: list[str] = []
+        for raw in raw_candidates:
+            if not raw:
+                continue
+            base = Path(raw).expanduser()
+            expanded = [base, base / "Spark-TTS", base / "spark-tts"]
+            for path_obj in expanded:
+                key = str(path_obj)
+                if key in seen_candidates:
+                    continue
+                seen_candidates.add(key)
+                candidates.append(key)
+
+        tried: list[str] = []
+        for candidate in candidates:
+            candidate_path = Path(candidate).expanduser().resolve()
+            spark_pkg_dir = candidate_path
+            if candidate_path.name == "sparktts":
+                spark_pkg_dir = candidate_path
+                candidate_path = candidate_path.parent
+            else:
+                spark_pkg_dir = candidate_path / "sparktts"
+            if not spark_pkg_dir.exists():
+                tried.append(str(candidate_path))
+                continue
+            if str(candidate_path) not in sys.path:
+                sys.path.insert(0, str(candidate_path))
+            try:
+                mod = importlib.import_module("sparktts.models.audio_tokenizer")
+                log.info(f"Loaded sparktts module from local repo path: {candidate_path}")
+                return mod.BiCodecTokenizer
+            except Exception as exc:
+                tried.append(str(candidate_path))
+                import_errors.append(
+                    f"{candidate_path}: {type(exc).__name__}: {exc}"
+                )
+                continue
+
+        tried_paths = ", ".join(tried) if tried else "none"
+        root_cause = " | ".join(import_errors[:4]) if import_errors else "unknown"
+        raise ImportError(
+            "Spark-TTS backend requires `sparktts` to be importable. "
+            "Install it (`pip install -r requirements.spark_tts.txt`) or set "
+            "`tts.spark_repo_path` / `SPARK_TTS_REPO` to your cloned Spark-TTS repo. "
+            f"Paths checked: {tried_paths}. Import errors: {root_cause}"
+        )
 
     @staticmethod
     def _resolve_model_ref(model_ref: str, local_dir: Path) -> Path:
@@ -210,8 +296,13 @@ class SparkTTSSynthesizer:
 
     def _build_prompt(self, text: str) -> str:
         text = text.strip()
-        if self._voice_prefix and not re.match(r"^\s*\d+\s*:", text):
-            text = f"{self._voice_prefix}: {text}"
+        if self._voice_prefix:
+            if self._force_voice_prefix:
+                # Always force configured speaker id (e.g., 248 for Luganda female voice).
+                text = self._SPEAKER_PREFIX_RE.sub("", text)
+                text = f"{self._voice_prefix}: {text}"
+            elif not self._SPEAKER_PREFIX_RE.match(text):
+                text = f"{self._voice_prefix}: {text}"
         return "".join(
             [
                 "<|task_tts|>",

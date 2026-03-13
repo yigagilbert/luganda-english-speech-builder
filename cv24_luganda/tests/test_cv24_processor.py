@@ -10,7 +10,6 @@ from __future__ import annotations
 import io
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import pytest
 import torch
@@ -25,6 +24,8 @@ from common_voice_24_luganda import (
     _normalise_text,
     _process_clip,
     apply_metadata_filters,
+    load_tsv_split,
+    validate_config,
 )
 
 
@@ -199,3 +200,38 @@ class TestConfig:
     def test_tsv_dir(self):
         cfg = Config(data_dir=Path("/data"))
         assert cfg.tsv_dir == Path("/data/extracted/lg")
+
+    def test_validate_config_rejects_bad_duration_range(self, tmp_path):
+        cfg = Config(
+            data_dir=tmp_path,
+            output_dir=tmp_path / "out",
+            min_duration_s=5.0,
+            max_duration_s=1.0,
+        )
+        with pytest.raises(SystemExit):
+            validate_config(cfg)
+
+    def test_validate_config_rejects_paired_push_without_general_steps(self, tmp_path):
+        cfg = Config(
+            data_dir=tmp_path,
+            output_dir=tmp_path / "out",
+            push_paired_to_hub=True,
+            run_general_steps=False,
+        )
+        with pytest.raises(SystemExit):
+            validate_config(cfg)
+
+
+class TestLoadTsvSplit:
+    def test_sentence_column_falls_back_to_text(self, tmp_path):
+        tsv = tmp_path / "validated.tsv"
+        tsv.write_text(
+            "path\tsentence\tup_votes\tdown_votes\n"
+            "clip_0001.mp3\tWebale nnyo\t3\t0\n",
+            encoding="utf-8",
+        )
+
+        df = load_tsv_split(tsv)
+
+        assert "text" in df.columns
+        assert df.loc[0, "text"] == "Webale nnyo"

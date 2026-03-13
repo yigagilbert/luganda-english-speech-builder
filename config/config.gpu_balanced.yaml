@@ -1,38 +1,42 @@
 # ============================================================
-#  CV24 General Steps GPU Fast Preset
-#  Used by scripts/run_cv24_gpu_fast.sh unless overridden.
+#  CV24 General Steps GPU Balanced Preset
+#  Recommended default on A100-class rented GPUs.
 # ============================================================
 
 audio:
   sample_rate: 16000
 
 translation:
-  # Fast default for rented GPUs (good speed/quality tradeoff).
-  backend: "nllb"
-  model: "facebook/nllb-200-distilled-600M"
-  src_lang: "lug_Latn"
-  tgt_lang: "eng_Latn"
-  batch_size: 64
+  # Better quality than distilled NLLB while still GPU-efficient.
+  backend: "nllb_custom"
+  model: "jq/nllb-1.3B-many-to-many-pronouncorrection-charaug"
+  tokenizer_model: "facebook/nllb-200-distilled-1.3B"
+  src_lang: "lug"
+  tgt_lang: "eng"
+  batch_size: 48
+  generation_batch_size: 48
+  chunk_size: 20
+  max_input_length: 256
   max_length: 100
   dtype: "bfloat16"
   device: "auto"
-  num_beams: 2
+  num_beams: 4
   compile: true
   allow_tf32: true
+  language_token_ids:
+    eng: 256047
+    ach: 256111
+    lgg: 256008
+    lug: 256110
+    nyn: 256002
+    teo: 256006
 
 tts:
-  # Keep Spark-TTS for high-throughput synthesis on GPU instances.
   backend: "spark_tts"
   model: "jq/spark-tts-salt"
   spark_repo_path: "Spark-TTS"
   spark_codec_model: "unsloth/Spark-TTS-0.5B"
   spark_cache_dir: "data/models/spark_tts"
-  spark_infer_backend: "vllm"
-  spark_vllm_tensor_parallel_size: 1
-  spark_vllm_gpu_memory_utilization: 0.90
-  spark_vllm_max_model_len: 4096
-  spark_vllm_dtype: "auto"
-  spark_vllm_enforce_eager: false
   spark_voice_prefix: "248"
   spark_force_voice_prefix: true
   spark_temperature: 0.8

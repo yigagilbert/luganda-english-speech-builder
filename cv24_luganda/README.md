@@ -105,10 +105,23 @@ By default this script:
 - runs `--run-general-steps` (translation + TTS + final assembly),
 - pushes paired output to `PAIRED_REPO_ID`,
 - places HF caches on fast local disk (`/mnt/nvme` or `/local` if present),
-- uses `config/config.gpu_fast.yaml` for fast translation/TTS defaults,
+- defaults to `PROFILE=balanced`,
 - prints an overall end-to-end terminal progress bar (plus per-step bars).
 
-To use a different config:
+Profiles:
+
+```bash
+# Fastest throughput, lower MT quality than the fine-tuned model
+PROFILE=fast bash scripts/run_cv24_gpu_fast.sh
+
+# Recommended default on A100-class GPUs
+PROFILE=balanced bash scripts/run_cv24_gpu_fast.sh
+
+# Slower, stricter filtering, strongest translation quality
+PROFILE=accurate bash scripts/run_cv24_gpu_fast.sh
+```
+
+To use a different config entirely:
 
 ```bash
 export PIPELINE_CONFIG="/path/to/your_config.yaml"
@@ -207,12 +220,9 @@ This bilingual output is what gets pushed when you use `--push-paired-to-hub`.
 For highest throughput:
 - Use an instance with high VRAM and local NVMe (A100 80GB preferred).
 - Keep caches on local NVMe (`HF_HOME`, `HF_DATASETS_CACHE`, `TRANSFORMERS_CACHE`).
-- Start with these config settings in `config/config.yaml` and then scale up:
-  - `translation.batch_size: 32` and `translation.generation_batch_size: 32`
-  - `translation.dtype: bfloat16` (A100/H100) or `float16` (L4/T4)
-  - `translation.compile: true`
-  - `tts.spark_compile: true`
-- Increase `batch_size` gradually until GPU memory is near full but stable.
+- Use `PROFILE=balanced` on A100/H100. Use `PROFILE=fast` on L4/T4 if memory is tight.
+- `PROFILE=accurate` raises `min_up_votes` and `min_snr` and uses the slower fine-tuned MT path.
+- Increase `translation.batch_size` and `translation.generation_batch_size` only after checking GPU headroom.
 - Use `NUM_WORKERS` near vCPU count for CV24 audio preprocessing (set via env in the launcher script).
 
 ---

@@ -57,7 +57,6 @@ Usage
 
 from __future__ import annotations
 
-import io
 import logging
 import os
 import sys
@@ -69,7 +68,6 @@ from pathlib import Path
 from typing import Any, Callable
 
 import click
-import numpy as np
 import pandas as pd
 import torch
 import torchaudio
@@ -77,6 +75,7 @@ import torchaudio.functional as AF
 import yaml
 from datasets import Audio, Dataset
 from dotenv import load_dotenv
+from luganda_pipeline.utils.audio_utils import estimate_snr, peak_normalise, tensor_to_bytes
 from rich.console import Console
 from rich.logging import RichHandler
 from rich.progress import (
@@ -310,6 +309,10 @@ def load_tsv_split(tsv_path: Path) -> pd.DataFrame:
     # Normalise column names (older CV versions differ slightly)
     df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
 
+    # Some CV exports use "sentence" instead of "text".
+    if "text" not in df.columns and "sentence" in df.columns:
+        df["text"] = df["sentence"]
+
     # Ensure expected columns exist
     for col in ("path", "text", "up_votes", "down_votes"):
         if col not in df.columns:
@@ -433,6 +436,37 @@ def _log_drop(n_before: int, n_after: int, reason: str) -> None:
         log.info(f"  Dropped {dropped:,} ({dropped/n_before*100:.1f}%) — {reason}")
 
 
+def validate_config(cfg: Config) -> None:
+    """Fail fast on invalid runtime configuration."""
+    if not cfg.splits or not all(s.strip() for s in cfg.splits):
+        log.error("At least one non-empty split is required.")
+        sys.exit(1)
+    if cfg.target_sr <= 0:
+        log.error("--target-sr must be > 0.")
+        sys.exit(1)
+    if cfg.num_workers < 1:
+        log.error("--num-workers must be >= 1.")
+        sys.exit(1)
+    if cfg.min_duration_s <= 0:
+        log.error("--min-duration must be > 0.")
+        sys.exit(1)
+    if cfg.max_duration_s < cfg.min_duration_s:
+        log.error("--max-duration must be >= --min-duration.")
+        sys.exit(1)
+    if cfg.min_text_len < 0:
+        log.error("--min-text-len must be >= 0.")
+        sys.exit(1)
+    if cfg.max_text_len < cfg.min_text_len:
+        log.error("--max-text-len must be >= --min-text-len.")
+        sys.exit(1)
+    if cfg.push_to_hub and not cfg.hub_repo_id:
+        log.error("--push-to-hub requires --hub-repo-id.")
+        sys.exit(1)
+    if cfg.push_paired_to_hub and not cfg.run_general_steps:
+        log.error("--push-paired-to-hub requires --run-general-steps.")
+        sys.exit(1)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Per-clip audio processing (runs in worker processes)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -473,32 +507,17 @@ def _process_clip(args: tuple) -> dict | None:
     if not (min_dur <= duration_s <= max_dur):
         return None
 
-    # SNR estimate (energy-based)
-    frame_len = int(sr * 0.03)  # 30 ms frames
-    wav_np = waveform.squeeze(0).numpy()
-    n_frames = len(wav_np) // frame_len
-    if n_frames >= 2:
-        frames = wav_np[: n_frames * frame_len].reshape(n_frames, frame_len)
-        energies = (frames ** 2).mean(axis=1)
-        if energies.max() > 1e-10:
-            noise_floor = np.percentile(energies, 10)
-            signal_peak = np.percentile(energies, 90)
-            snr = 10 * np.log10(signal_peak / (noise_floor + 1e-10))
-            if snr < min_snr:
-                return None
+    # SNR estimate
+    if estimate_snr(waveform, sr) < min_snr:
+        return None
 
-    # Peak normalise to -1 dBFS
-    peak = waveform.abs().max()
-    if peak > 1e-8:
-        waveform = waveform * (10 ** (-1.0 / 20.0) / peak)
-
-    # Encode as 16-bit PCM WAV bytes
-    wav_int16 = (waveform.clamp(-1.0, 1.0) * 32767).to(torch.int16)
-    buf = io.BytesIO()
-    torchaudio.save(buf, wav_int16, sr, format="wav", bits_per_sample=16)
-    wav_bytes = buf.getvalue()
+    # Peak normalise and encode with the shared audio helper to avoid
+    # backend-specific torchaudio BytesIO save issues.
+    waveform = peak_normalise(waveform, target_dbfs=-1.0)
+    wav_bytes = tensor_to_bytes(waveform, sample_rate=sr)
 
     return {
+        "_row_idx":   row_idx,
         "id":        id_str,
         "audio_lug": {"bytes": wav_bytes, "path": None},
         "text_lug":  text_lug,
@@ -530,6 +549,8 @@ def process_audio_parallel(df: pd.DataFrame, cfg: Config) -> list[dict]:
 
     records: list[dict] = []
     n_skipped = 0
+    n_failed = 0
+    max_worker_warnings = 5
 
     log.info(f"Processing {len(args_list):,} clips with {cfg.num_workers} workers…")
 
@@ -548,16 +569,27 @@ def process_audio_parallel(df: pd.DataFrame, cfg: Config) -> list[dict]:
         with ProcessPoolExecutor(max_workers=cfg.num_workers) as pool:
             futures = {pool.submit(_process_clip, a): a for a in args_list}
             for future in as_completed(futures):
-                result = future.result()
-                if result is not None:
-                    records.append(result)
-                else:
-                    n_skipped += 1
+                try:
+                    result = future.result()
+                    if result is not None:
+                        records.append(result)
+                    else:
+                        n_skipped += 1
+                except Exception as exc:
+                    n_failed += 1
+                    if n_failed <= max_worker_warnings:
+                        log.warning(f"  Worker failed for one clip: {type(exc).__name__}: {exc}")
                 progress.advance(task)
+
+    # Keep dataset ordering deterministic even though worker completion order
+    # is nondeterministic.
+    records.sort(key=lambda item: int(item["_row_idx"]))
+    for record in records:
+        record.pop("_row_idx", None)
 
     log.info(
         f"  Audio processed: [bold]{len(records):,}[/bold] kept, "
-        f"{n_skipped:,} skipped (duration/SNR/decode failure)"
+        f"{n_skipped:,} skipped, {n_failed:,} worker failures"
     )
     return records
 
@@ -877,7 +909,7 @@ def main(
         output_dir=Path(output_dir),
         download_url=download_url,
         download_token=download_token,
-        splits=[s.strip() for s in splits.split(",")],
+        splits=[s.strip() for s in splits.split(",") if s.strip()],
         validated_only=validated_only,
         min_up_votes=min_up_votes,
         min_duration_s=min_duration,
@@ -900,9 +932,7 @@ def main(
         id_prefix=id_prefix,
     )
 
-    if cfg.push_paired_to_hub and not cfg.run_general_steps:
-        log.error("--push-paired-to-hub requires --run-general-steps.")
-        sys.exit(1)
+    validate_config(cfg)
 
     planned_steps = [
         "Download",

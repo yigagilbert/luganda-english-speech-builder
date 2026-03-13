@@ -70,3 +70,21 @@ def test_validate_schema_catches_duplicate_ids():
     })
     with pytest.raises(AssertionError, match="Duplicate IDs"):
         validate_schema(ds)
+
+
+def test_audio_item_has_payload_accepts_audio_decoder_like_items():
+    from luganda_pipeline.assembly.build import _audio_item_has_payload
+
+    class _FakeSamples:
+        def __init__(self, data):
+            self.data = data
+
+    class _FakeAudioDecoder:
+        def __init__(self, data):
+            self._data = data
+
+        def get_all_samples(self):
+            return _FakeSamples(self._data)
+
+    assert _audio_item_has_payload(_FakeAudioDecoder([0.1, -0.1]))
+    assert not _audio_item_has_payload(None)

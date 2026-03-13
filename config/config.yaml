@@ -109,9 +109,17 @@ translation:
 tts:
   backend:    "spark_tts"      # Options: "spark_tts" | "speecht5" | "sunbird_api" | "coqui"
   model:      "jq/spark-tts-salt"
+  spark_repo_path: "Spark-TTS" # Path to local Spark-TTS clone (or set SPARK_TTS_REPO)
   spark_codec_model: "unsloth/Spark-TTS-0.5B"
   spark_cache_dir: "data/models/spark_tts"
+  spark_infer_backend: "vllm"  # Options: "vllm" | "transformers"
+  spark_vllm_tensor_parallel_size: 1
+  spark_vllm_gpu_memory_utilization: 0.90
+  spark_vllm_max_model_len: 4096
+  spark_vllm_dtype: "auto"
+  spark_vllm_enforce_eager: false
   spark_voice_prefix: "248"    # 248 = Luganda female voice in SALT studio set
+  spark_force_voice_prefix: true
   spark_temperature: 0.8
   spark_top_k: 50
   spark_top_p: 1.0
@@ -134,7 +142,7 @@ hub:
   repo_type:       "dataset"
   private:         true
   max_shard_size:  "2GB"
-  push_to_hub:     false       # Set true when ready to publish
+  push_to_hub:     true       # Set true when ready to publish
 
 # ── QA / Reporting ───────────────────────────────────────────
 qa:

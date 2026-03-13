@@ -97,6 +97,19 @@ For Spark-TTS backend:
 pip install -r requirements.spark_tts.txt
 ```
 
+If you cloned Spark-TTS locally instead of installing it as a package, set:
+
+```bash
+export SPARK_TTS_REPO=/absolute/path/to/Spark-TTS
+```
+
+To use vLLM inference for Spark-TTS generation, set:
+
+```yaml
+tts:
+  spark_infer_backend: "vllm"
+```
+
 ### 2. Configure
 
 ```bash
@@ -129,8 +142,8 @@ STAGE=tts bash scripts/run_gpu_fast.sh
 
 # CV24 Luganda -> bilingual dataset fast path:
 bash scripts/run_cv24_gpu_fast.sh
-# default tuned preset:
-# config/config.gpu_fast.yaml
+# profile switch:
+# PROFILE=fast|balanced|accurate
 ```
 
 ### 4. Run a single stage

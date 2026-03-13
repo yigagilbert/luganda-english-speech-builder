@@ -60,7 +60,26 @@ DATA_DIR="${DATA_DIR:-$PROJECT_ROOT/data/cv24_luganda}"
 OUTPUT_DIR="${OUTPUT_DIR:-$PROJECT_ROOT/data/cv24_luganda/processed}"
 PAIRED_OUTPUT_DIR="${PAIRED_OUTPUT_DIR:-$OUTPUT_DIR/paired_general_steps}"
 SPLITS="${SPLITS:-validated}"
-PIPELINE_CONFIG="${PIPELINE_CONFIG:-$PROJECT_ROOT/config/config.gpu_fast.yaml}"
+PROFILE="${PROFILE:-balanced}"  # fast | balanced | accurate
+if [ -z "${PIPELINE_CONFIG:-}" ]; then
+    case "$PROFILE" in
+        fast)
+            PIPELINE_CONFIG="$PROJECT_ROOT/config/config.gpu_fast.yaml"
+            ;;
+        balanced)
+            PIPELINE_CONFIG="$PROJECT_ROOT/config/config.gpu_balanced.yaml"
+            ;;
+        accurate)
+            PIPELINE_CONFIG="$PROJECT_ROOT/config/config.gpu_accurate.yaml"
+            ;;
+        *)
+            echo "ERROR: PROFILE must be one of: fast, balanced, accurate."
+            exit 1
+            ;;
+    esac
+else
+    PIPELINE_CONFIG="$PIPELINE_CONFIG"
+fi
 RUN_GENERAL_STEPS="${RUN_GENERAL_STEPS:-1}"
 PUSH_LUG_ONLY="${PUSH_LUG_ONLY:-0}"
 PUSH_PAIRED="${PUSH_PAIRED:-1}"
@@ -68,9 +87,38 @@ LUGANDA_REPO_ID="${LUGANDA_REPO_ID:-}"
 PAIRED_REPO_ID="${PAIRED_REPO_ID:-}"
 NUM_WORKERS="${NUM_WORKERS:-$(( CPU_COUNT > 4 ? CPU_COUNT - 2 : 2 ))}"
 TARGET_SR="${TARGET_SR:-16000}"
+VALIDATED_ONLY="${VALIDATED_ONLY:-1}"
+MIN_UP_VOTES="${MIN_UP_VOTES:-}"
+MIN_SNR="${MIN_SNR:-}"
+MIN_DURATION="${MIN_DURATION:-}"
+MAX_DURATION="${MAX_DURATION:-}"
 SKIP_DOWNLOAD="${SKIP_DOWNLOAD:-0}"
 SKIP_EXTRACT="${SKIP_EXTRACT:-0}"
 HF_VISIBILITY="${HF_VISIBILITY:-private}"  # private | public
+
+if [ -z "$MIN_UP_VOTES" ]; then
+    case "$PROFILE" in
+        fast) MIN_UP_VOTES="2" ;;
+        balanced) MIN_UP_VOTES="2" ;;
+        accurate) MIN_UP_VOTES="3" ;;
+    esac
+fi
+
+if [ -z "$MIN_SNR" ]; then
+    case "$PROFILE" in
+        fast) MIN_SNR="15.0" ;;
+        balanced) MIN_SNR="16.0" ;;
+        accurate) MIN_SNR="18.0" ;;
+    esac
+fi
+
+if [ -z "$MIN_DURATION" ]; then
+    MIN_DURATION="0.5"
+fi
+
+if [ -z "$MAX_DURATION" ]; then
+    MAX_DURATION="30.0"
+fi
 
 if [ -z "${CV24_DOWNLOAD_URL:-}" ] && [ "$SKIP_DOWNLOAD" != "1" ]; then
     echo "ERROR: CV24_DOWNLOAD_URL is not set and SKIP_DOWNLOAD != 1."
@@ -87,10 +135,13 @@ cd "$PROJECT_ROOT"
 
 echo "=============================================="
 echo "  CV24 Luganda GPU-Optimized Run"
+echo "  Profile     : $PROFILE"
 echo "  Data dir    : $DATA_DIR"
 echo "  Output dir  : $OUTPUT_DIR"
 echo "  Splits      : $SPLITS"
 echo "  Workers     : $NUM_WORKERS"
+echo "  Min votes   : $MIN_UP_VOTES"
+echo "  Min SNR     : $MIN_SNR"
 echo "  HF_HOME     : $HF_HOME"
 echo "=============================================="
 
@@ -105,9 +156,19 @@ CMD=(
     "--splits" "$SPLITS"
     "--num-workers" "$NUM_WORKERS"
     "--target-sr" "$TARGET_SR"
+    "--min-up-votes" "$MIN_UP_VOTES"
+    "--min-snr" "$MIN_SNR"
+    "--min-duration" "$MIN_DURATION"
+    "--max-duration" "$MAX_DURATION"
     "--pipeline-config" "$PIPELINE_CONFIG"
     "--paired-output-dir" "$PAIRED_OUTPUT_DIR"
 )
+
+if [ "$VALIDATED_ONLY" = "1" ]; then
+    CMD+=("--validated-only")
+else
+    CMD+=("--no-validated-only")
+fi
 
 if [ "$SKIP_DOWNLOAD" = "1" ]; then
     CMD+=("--skip-download")
